@@ -7,6 +7,8 @@ from xgboost import XGBClassifier
 from sklearn.metrics import classification_report
 from sklearn.model_selection import RandomizedSearchCV
 import time
+import os
+import pickle
 
 def load_and_preprocess_data(file_path):
     print("Loading data from", file_path)
@@ -42,22 +44,44 @@ def encode_labels(train_data, test_data):
     print(f"Number of unique labels: {len(le.classes_)}")
     return train_data, test_data, le
 
-def create_features(train_data, test_data, feature_columns):
+def create_features(train_data, test_data, feature_columns, cache_dir='embedding_cache'):
     print("Creating features using SentenceTransformer")
     model = SentenceTransformer('all-MiniLM-L6-v2')
     
     def combine_features(row):
         return ' '.join(str(row[col]) for col in feature_columns)
     
-    print("Combining features for train set")
-    train_combined = train_data.apply(combine_features, axis=1)
-    print("Combining features for test set")
-    test_combined = test_data.apply(combine_features, axis=1)
+    def get_cache_path(prefix):
+        return os.path.join(cache_dir, f"{prefix}_embeddings.pkl")
     
-    print("Encoding train set")
-    train_embeddings = model.encode(train_combined.tolist(), show_progress_bar=True)
-    print("Encoding test set")
-    test_embeddings = model.encode(test_combined.tolist(), show_progress_bar=True)
+    os.makedirs(cache_dir, exist_ok=True)
+    
+    train_cache_path = get_cache_path('train')
+    test_cache_path = get_cache_path('test')
+    
+    if os.path.exists(train_cache_path) and os.path.exists(test_cache_path):
+        print("Loading embeddings from cache")
+        with open(train_cache_path, 'rb') as f:
+            train_embeddings = pickle.load(f)
+        with open(test_cache_path, 'rb') as f:
+            test_embeddings = pickle.load(f)
+    else:
+        print("Combining features for train set")
+        train_combined = train_data.apply(combine_features, axis=1)
+        print("Combining features for test set")
+        test_combined = test_data.apply(combine_features, axis=1)
+        
+        print("Encoding train set")
+        train_embeddings = model.encode(train_combined.tolist(), show_progress_bar=True)
+        print("Encoding test set")
+        test_embeddings = model.encode(test_combined.tolist(), show_progress_bar=True)
+        
+        print("Caching embeddings")
+        with open(train_cache_path, 'wb') as f:
+            pickle.dump(train_embeddings, f)
+        with open(test_cache_path, 'wb') as f:
+            pickle.dump(test_embeddings, f)
+    
     return train_embeddings, test_embeddings
 
 def train_and_tune_xgboost(X_train, y_train):
@@ -89,7 +113,7 @@ def main(file_path, feature_columns):
     # Encode labels
     train_data, test_data, le = encode_labels(train_data, test_data)
     
-    # Create features
+    # Create features (now with caching)
     train_embeddings, test_embeddings = create_features(train_data, test_data, feature_columns)
     
     # Train and tune XGBoost model
@@ -112,4 +136,9 @@ def main(file_path, feature_columns):
     output_file = 'test_results.csv'
     print(f"Saving results to {output_file}")
     test_data.to_csv(output_file, index=False)
-    print("
+    print("Done!")
+
+if __name__ == "__main__":
+    file_path = "your_data.csv"  # Replace with your actual file path
+    feature_columns = ['company_name', 'attribute1', 'attribute2']  # Add all your input columns here
+    main(file_path, feature_columns)
