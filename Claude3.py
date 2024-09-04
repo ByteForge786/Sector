@@ -1,8 +1,9 @@
-import pandas as pd
+ import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from setfit import SetFitModel, SetFitTrainer
 from sklearn.metrics import classification_report
+from tqdm.auto import tqdm
 
 def load_and_preprocess_data(file_path, feature_columns):
     print("Loading data from", file_path)
@@ -51,6 +52,16 @@ def encode_labels(data):
     print(f"Number of unique labels: {len(le.classes_)}")
     return data, le, label_to_id, id_to_label
 
+class ProgressCallback:
+    def __init__(self, total_iterations):
+        self.pbar = tqdm(total=total_iterations, desc="Training progress")
+
+    def on_step_end(self, args, state, control):
+        self.pbar.update(1)
+
+    def on_train_end(self, args, state, control):
+        self.pbar.close()
+
 def train_setfit_model(train_data, eval_data, num_iterations=20, batch_size=16):
     print(f"Training SetFit model for {num_iterations} iterations")
     model = SetFitModel.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
@@ -64,6 +75,9 @@ def train_setfit_model(train_data, eval_data, num_iterations=20, batch_size=16):
         batch_size=batch_size,
         metric="accuracy",
     )
+
+    progress_callback = ProgressCallback(num_iterations)
+    trainer.add_callback(progress_callback)
 
     trainer.train()
     eval_metrics = trainer.evaluate()
