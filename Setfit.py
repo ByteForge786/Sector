@@ -1,3 +1,23 @@
+def create_sentence_from_features(row, feature_columns):
+    """
+    Combine the feature values into a natural sentence format.
+    """
+    parts = []
+    for col in feature_columns:
+        feature_value = row[col]
+        if pd.notna(feature_value) and feature_value != '':
+            parts.append(f"{col.replace('_', ' ').capitalize()}: {feature_value}")
+    return ". ".join(parts) + "."
+
+def create_features(data, feature_columns, cache_prefix=''):
+    print(f"Creating features for {cache_prefix} using SentenceTransformer")
+    model = SentenceTransformer('all-MiniLM-L6-v2')
+    
+    # Create a natural sentence from the feature columns
+    data_combined = data.apply(lambda row: create_sentence_from_features(row, feature_columns), axis=1).tolist()
+    embeddings = model.encode(data_combined, show_progress_bar=True)
+    
+    return embeddings
 
 import pandas as pd
 import numpy as np
