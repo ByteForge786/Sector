@@ -1,13 +1,10 @@
-import pandas as pd
-import numpy as np
-from sklearn.model_selection import train_test_split
+ import pandas as pd
 from sklearn.preprocessing import LabelEncoder
 from setfit import SetFitModel, SetFitTrainer
 from sklearn.metrics import classification_report
-from tqdm.auto import tqdm
-from datasets import Dataset  # Import the Hugging Face Dataset library
+from datasets import Dataset
 
-def load_and_preprocess_data(file_path, feature_columns):
+def load_and_preprocess_data(file_path, feature_columns, eval_percentage=0.05):
     print("Loading data from", file_path)
     df = pd.read_csv(file_path)
     print(f"Loaded {len(df)} rows of data")
@@ -25,7 +22,7 @@ def load_and_preprocess_data(file_path, feature_columns):
     
     if df.empty:
         print("No valid data after preprocessing. Please check your input file and feature columns.")
-        return None
+        return None, None
     
     print("Counting labels and finding minimum count")
     label_counts = df['label'].value_counts()
@@ -42,7 +39,22 @@ def load_and_preprocess_data(file_path, feature_columns):
             balanced_data = pd.concat([balanced_data, label_data])
     
     print(f"Balanced dataset size: {len(balanced_data)}")
-    return balanced_data
+
+    # Create evaluation dataset by taking 5% of data from each label
+    print("Creating evaluation dataset")
+    eval_data = pd.DataFrame()
+    for label in balanced_data['label'].unique():
+        label_data = balanced_data[balanced_data['label'] == label]
+        eval_samples = label_data.sample(frac=eval_percentage, random_state=42)
+        eval_data = pd.concat([eval_data, eval_samples])
+    
+    # Remove evaluation samples from the training data
+    train_data = balanced_data.drop(eval_data.index)
+
+    print(f"Training set size: {len(train_data)}")
+    print(f"Evaluation set size: {len(eval_data)}")
+    
+    return train_data, eval_data
 
 def encode_labels(data):
     print("Encoding labels")
@@ -58,89 +70,90 @@ def encode_labels(data):
     print(f"Number of unique labels: {len(le.classes_)}")
     return data, le, label_to_id, id_to_label
 
-class ProgressCallback:
-    def __init__(self, total_iterations):
-        self.pbar = tqdm(total=total_iterations, desc="Training progress")
+def train_setfit_model(train_data, eval_data, num_epochs=2, output_dir='best_model'):
+    print("Training SetFit model")
 
-    def on_step_end(self, args, state, control):
-        self.pbar.update(1)
+    try:
+        # Convert DataFrame to Hugging Face Dataset format
+        train_dataset = Dataset.from_pandas(train_data)
+        eval_dataset = Dataset.from_pandas(eval_data)
 
-    def on_train_end(self, args, state, control):
-        self.pbar.close()
+        # Initialize SetFit model with classification head
+        model = SetFitModel.from_pretrained("sentence-transformers/all-MiniLM-L6-v2", 
+                                            use_differentiable_head=True, 
+                                            head_params={"n_classes": len(train_data['encoded_label'].unique())})
 
-def train_setfit_model(train_data, eval_data, num_iterations=20, batch_size=16):
-    print(f"Training SetFit model for {num_iterations} iterations")
+        trainer = SetFitTrainer(
+            model=model,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+            column_mapping={"text": "text", "label": "encoded_label"},
+            metric="accuracy",
+            num_epochs=num_epochs,  # Set number of epochs
+            save_best_model=True,   # Save the best model
+            output_dir=output_dir,  # Directory to save the best model
+        )
+
+        print("Starting training process...")
+        trainer.train()
+        eval_metrics = trainer.evaluate()
+        print(f"Evaluation metrics: {eval_metrics}")
+        print(f"Model training complete. Best model saved to {output_dir}")
+    except Exception as e:
+        print("An error occurred during model training:", e)
     
-    # Convert DataFrame to Hugging Face Dataset format
-    train_dataset = Dataset.from_pandas(train_data)
-    eval_dataset = Dataset.from_pandas(eval_data)
-
-    model = SetFitModel.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
-
-    trainer = SetFitTrainer(
-        model=model,
-        train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
-        column_mapping={"text": "text", "label": "encoded_label"},
-        num_iterations=num_iterations,
-        batch_size=batch_size,
-        metric="accuracy",
-    )
-
-    progress_callback = ProgressCallback(num_iterations)
-    trainer.add_callback(progress_callback)
-
-    trainer.train()
-    eval_metrics = trainer.evaluate()
-    print(f"Evaluation metrics: {eval_metrics}")
-    
-    print("Model training complete")
     return trainer.model
 
 def predict_unseen_data(model, id_to_label, unseen_data):
     print("Predicting unseen data")
-    
-    # Make predictions using the fine-tuned model
-    predictions = model.predict(unseen_data['text'].tolist())
-    
-    # Convert numeric predictions back to original labels
-    predicted_labels = [id_to_label[pred] for pred in predictions]
-    
-    # Add predictions to unseen data
-    unseen_data['predicted_label'] = predicted_labels
-    
-    print("Predictions complete")
+    try:
+        # Make predictions using the fine-tuned model
+        predictions = model.predict(unseen_data['text'].tolist())
+
+        # Convert numeric predictions back to original labels
+        predicted_labels = [id_to_label[pred] for pred in predictions]
+
+        # Add predictions to unseen data
+        unseen_data['predicted_label'] = predicted_labels
+
+        print("Predictions complete")
+    except Exception as e:
+        print("An error occurred during predictions on unseen data:", e)
     return unseen_data
 
-def main(file_path, feature_columns, num_iterations=20, batch_size=16, test_size=0.2, eval_size=0.1):
+def main(file_path, feature_columns):
     # Load and preprocess data
-    data = load_and_preprocess_data(file_path, feature_columns)
+    train_data, eval_data = load_and_preprocess_data(file_path, feature_columns)
     
-    if data is None or data.empty:
+    if train_data is None or train_data.empty:
         print("No data available after preprocessing. Please check your input file and feature columns.")
         return
     
     # Encode labels and get mappings
-    data, le, label_to_id, id_to_label = encode_labels(data)
+    train_data, le, label_to_id, id_to_label = encode_labels(train_data)
+    eval_data, _, _, _ = encode_labels(eval_data)
     
-    # Split data into train, eval, and test sets
-    train_eval_data, test_data = train_test_split(data, test_size=test_size, stratify=data['label'], random_state=42)
-    train_data, eval_data = train_test_split(train_eval_data, test_size=eval_size, stratify=train_eval_data['label'], random_state=42)
+    # Train SetFit model and save the best one
+    model = train_setfit_model(train_data, eval_data)
     
-    print(f"Train set size: {len(train_data)}")
-    print(f"Evaluation set size: {len(eval_data)}")
+    # Use the remaining data from the original dataset for testing
+    test_data = pd.read_csv(file_path)
+    test_data = test_data[~test_data.index.isin(train_data.index) & ~test_data.index.isin(eval_data.index)]
+    test_data, _, _, _ = encode_labels(test_data)  # Re-encode test data labels
+    
     print(f"Test set size: {len(test_data)}")
-    
-    # Train SetFit model
-    model = train_setfit_model(train_data, eval_data, num_iterations, batch_size)
     
     # Make predictions on test data
     print("Making predictions on test set")
     predictions = model.predict(test_data['text'].tolist())
     predicted_labels = [id_to_label[pred] for pred in predictions]
     
-    # Add predictions to test data
+    # Get prediction probabilities
+    prediction_probs = model.predict_proba(test_data['text'].tolist())
+    
+    # Add predictions and probabilities to test data
     test_data['predicted_label'] = predicted_labels
+    test_data['prediction_probability'] = prediction_probs.max(axis=1)  # Get the max probability for each prediction
     
     # Calculate and print classification report
     print("\nClassification Report:")
@@ -179,4 +192,4 @@ def main(file_path, feature_columns, num_iterations=20, batch_size=16, test_size
 if __name__ == "__main__":
     file_path = "your_data.csv"  # Replace with your actual file path
     feature_columns = ['company_name', 'attribute1', 'attribute2']  # Add all your input columns here
-    main(file_path, feature_columns, num_iterations=20, batch_size=16)  # You can adjust the number of iterations and batch size here
+    main(file_path, feature_columns)  # Start the main process
