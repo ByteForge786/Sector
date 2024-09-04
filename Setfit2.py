@@ -1,3 +1,45 @@
+import torch
+from torch.utils.data import Dataset
+
+class EmbeddingsDataset(Dataset):
+    """Custom Dataset for loading embeddings and labels."""
+    def __init__(self, embeddings, labels):
+        self.embeddings = torch.tensor(embeddings, dtype=torch.float32)
+        self.labels = torch.tensor(labels, dtype=torch.long)
+
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, idx):
+        return self.embeddings[idx], self.labels[idx]
+
+def train_setfit_model(train_embeddings, train_labels, eval_embeddings, eval_labels, num_epochs=3):
+    print(f"Training SetFit model for {num_epochs} epochs")
+    
+    # Convert train and eval data into PyTorch datasets
+    train_dataset = EmbeddingsDataset(train_embeddings, train_labels)
+    eval_dataset = EmbeddingsDataset(eval_embeddings, eval_labels)
+    
+    # Load the SetFit model
+    model = SetFitModel.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
+
+    # Initialize SetFitTrainer with the datasets and hyperparameters
+    trainer = SetFitTrainer(
+        model=model,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        metric="accuracy",
+        num_epochs=num_epochs
+    )
+
+    # Train and evaluate the model
+    trainer.train()
+    trainer.evaluate()
+    
+    print("Model training complete")
+    return trainer
+
+
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
