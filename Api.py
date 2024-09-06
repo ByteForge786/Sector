@@ -4,8 +4,6 @@ from sentence_transformers import SentenceTransformer
 import pickle
 from tqdm import tqdm
 import os
-from concurrent.futures import ProcessPoolExecutor, as_completed
-import psutil
 import json
 
 def load_model_and_encoder(model_dir='saved_model'):
@@ -19,52 +17,48 @@ def load_model_and_encoder(model_dir='saved_model'):
     
     return model, le
 
-def create_embeddings_batch(args):
-    batch, feature_columns, model_name = args
-    model = SentenceTransformer(model_name)
+def create_embeddings(df, feature_columns, batch_size=1000):
+    model = SentenceTransformer('all-MiniLM-L6-v2')
     
     def combine_features(row):
         return ', '.join(f"{col}: {row[col]}" for col in feature_columns)
     
-    combined_features = [combine_features(row) for _, row in batch.iterrows()]
-    return model.encode(combined_features, show_progress_bar=False)
-
-def create_embeddings(df, feature_columns, batch_size=1000, num_processes=None):
-    model_name = 'paraphrase-MiniLM-L3-v2'  # Smaller, faster model
-    
-    if num_processes is None:
-        num_processes = max(1, psutil.cpu_count(logical=False) - 1)  # Use physical cores minus 1
+    combined_features = df.apply(combine_features, axis=1)
     
     if len(df) <= batch_size:
-        return create_embeddings_batch((df, feature_columns, model_name))
-    
-    batches = [df[i:i+batch_size] for i in range(0, len(df), batch_size)]
+        return model.encode(combined_features.tolist(), show_progress_bar=True)
     
     all_embeddings = []
-    with ProcessPoolExecutor(max_workers=num_processes) as executor:
-        futures = [executor.submit(create_embeddings_batch, (batch, feature_columns, model_name)) for batch in batches]
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Creating embeddings"):
-            all_embeddings.append(future.result())
+    for i in tqdm(range(0, len(df), batch_size), desc="Creating embeddings"):
+        batch = combined_features[i:i+batch_size].tolist()
+        embeddings = model.encode(batch, show_progress_bar=False)
+        all_embeddings.append(embeddings)
     
     return np.vstack(all_embeddings)
 
 def batch_predict(df, feature_columns, model, le, batch_size=10000):
     embeddings = create_embeddings(df, feature_columns, batch_size)
     
-    all_predictions = []
-    all_max_probabilities = []
+    if len(df) <= batch_size:
+        predictions = model.predict(embeddings)
+        probabilities = model.predict_proba(embeddings)
+        max_probabilities = np.max(probabilities, axis=1)
+    else:
+        all_predictions = []
+        all_max_probabilities = []
+        for i in tqdm(range(0, len(df), batch_size), desc="Making predictions"):
+            batch_embeddings = embeddings[i:i+batch_size]
+            predictions = model.predict(batch_embeddings)
+            probabilities = model.predict_proba(batch_embeddings)
+            all_predictions.extend(predictions)
+            all_max_probabilities.extend(np.max(probabilities, axis=1))
+        predictions = all_predictions
+        max_probabilities = all_max_probabilities
     
-    for i in tqdm(range(0, len(df), batch_size), desc="Making predictions"):
-        batch_embeddings = embeddings[i:i+batch_size]
-        predictions = model.predict(batch_embeddings)
-        probabilities = model.predict_proba(batch_embeddings)
-        all_predictions.extend(predictions)
-        all_max_probabilities.extend(np.max(probabilities, axis=1))
-    
-    predicted_labels = le.inverse_transform(all_predictions)
+    predicted_labels = le.inverse_transform(predictions)
     
     df['predicted_label'] = predicted_labels
-    df['max_probability'] = all_max_probabilities
+    df['max_probability'] = max_probabilities
     
     return df
 
